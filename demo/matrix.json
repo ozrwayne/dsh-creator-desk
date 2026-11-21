@@ -1,0 +1,6 @@
+{
+  "groups": [
+    {"id":"paper","icon":"globe","zh":"纸飞机编辑部","en":"Paper Plane Studio","avatar":"paper-plane.svg","platforms":["公众号","X","知乎","今日头条","Substack","LinkedIn","GitHub","微博"]},
+    {"id":"reel","icon":"play","zh":"纸飞机放映室","en":"Paper Plane Cinema","avatar":"reel.svg","platforms":["B站","小红书","抖音","视频号","YouTube","TikTok","Instagram","播客","小宇宙","Apple Podcasts"]}
+  ]
+}

@@ -1,0 +1,121 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { initDemo, initializeDefaultGallery } from '../scripts/init-demo.mjs'
+import { Settings } from '../src/settings.js'
+import { Pieces } from '../src/pieces.js'
+import { Vault, PATHS } from '../src/vault.js'
+import { parseOwnSource, OWN_SOURCE } from '../src/own-source.js'
+import { BundleService } from '../src/publish-bundle.js'
+import { PublishStore, DESK_TO_MAITIAN } from '../src/publish-map.js'
+import { readBenchLibrary } from '../src/bench-library.js'
+
+test('内容看板：已发短推、在写长文、原生验证标记和上下游详情来自演示库', async t => {
+  const temp = await mkdtemp(join(tmpdir(), 'media-desk-content-'))
+  t.after(() => rm(temp, { recursive:true, force:true }))
+  const { root } = await initDemo(join(temp,'content'))
+  const settings = new Settings(root)
+  const pieces = new Pieces(settings,{ dataDir:root })
+  const board = await pieces.board()
+  const shorts = board.pieces.filter(p=>p.form==='短推' && p.status==='已发布')
+  const drafts = board.pieces.filter(p=>p.form==='长文' && p.status==='进行中')
+  const videos = board.pieces.filter(p => p.form === '视频')
+  assert.equal(videos.length, 1)
+  const [video] = videos
+  assert.equal(video.status, '定稿')
+  assert.deepEqual(video.distributions, [])
+  const bundles = new BundleService({settings, pieces:()=>pieces, publishStore:new PublishStore(root)})
+  const ready = await bundles.status(video.note)
+  assert.equal(ready.readyToFill, true)
+  assert.equal(ready.videoReady, true)
+  assert.deepEqual(Object.entries(ready.bundle.platforms).filter(([,p])=>!p.skip).map(([id])=>id).sort(), Object.values(DESK_TO_MAITIAN).sort())
+  const clip = await bundles.videoFileFor({note:video.note})
+  assert.deepEqual(await readFile(clip.file), await readFile(new URL('../assets/v-tide.mp4', import.meta.url)))
+  assert.equal(shorts.length,3)
+  assert.equal(drafts.length,3)
+  assert.equal(shorts.filter(p=>p.verified).length,2)
+  assert.ok(shorts.every(p=>p.distributions.length===1 && p.distributions[0].platform==='X' && p.distributions[0].impressions>0))
+  assert.ok(drafts.every(p=>p.platforms.join(',')==='X,公众号,知乎' && !p.distributions.length))
+  const expanded = drafts.find(p=>shorts.some(s=>s.note===p.source && s.lineKey===p.lineKey))
+  assert.ok(expanded)
+  assert.match((await pieces.readPiece(expanded.note)).body,/## 下次记录/)
+  assert.ok(board.pieces.every(p=>p.problems.length===0))
+})
+
+test('公开样例：独立目录、七平台发布包、回填撤销与回收站还原', async t => {
+  const temp = await mkdtemp(join(tmpdir(), 'media-desk-demo-'))
+  t.after(() => rm(temp, { recursive:true, force:true }))
+  const home = join(temp,'data')
+  const { root, vaultRoot } = await initDemo(home,{ publishing:true })
+  await assert.rejects(() => initDemo(home), { code:'EEXIST' })
+  const accounts = parseOwnSource(await readFile(join(vaultRoot,OWN_SOURCE),'utf8')).rows
+  const expected = ['X','公众号','知乎','今日头条','Substack','LinkedIn','GitHub','微博','B站','小红书','抖音','视频号','YouTube','TikTok','Instagram','播客','小宇宙','Apple Podcasts'].sort()
+  assert.deepEqual(accounts.map(a=>a.platform).sort(),expected)
+  assert.ok(accounts.every(a=>a.registered && !a.handle && !a.url))
+  const ownPosts = (await readFile(join(root,'own','posts.jsonl'),'utf8')).trim().split('\n').map(JSON.parse)
+  for (const a of accounts) assert.ok(ownPosts.some(p=>p.accountId===a.key && p.sample))
+  const library = await readBenchLibrary(vaultRoot,{dataDir:root})
+  assert.deepEqual([...new Set(library.accounts.map(a=>a.platform))].sort(),expected)
+  assert.equal(new Set(library.posts.map(p=>p.id)).size,library.posts.length)
+  for (const a of library.accounts) assert.equal(library.posts.filter(p=>p.accountKey===a.accountKey).length,a.totalCount)
+  for (const platform of expected) assert.ok(library.posts.some(p=>p.platform===platform && p.title && p.createdAt),platform)
+  const settings = new Settings(root)
+  const pieces = new Pieces(settings,{ dataDir:root })
+  const board = await pieces.board()
+  assert.equal(board.lines.length, 2)
+  assert.deepEqual(board.pieces.map(p=>p.form).sort(), ['短推','短推','视频','视频','长文','长文'].sort())
+  const service = new BundleService({settings,pieces:()=>pieces,publishStore:new PublishStore(root)})
+  const note = '2026-03-14-纸飞机的折痕镜头'
+  const original = await pieces.readPiece(note)
+  const { dir } = await service.prepare({note})
+  assert.ok(dir.startsWith(root+'/'))
+  const conf = JSON.parse(await readFile(join(dir,'publish.json'),'utf8'))
+  assert.deepEqual(Object.keys(conf.platforms).sort(), Object.values(DESK_TO_MAITIAN).sort())
+  assert.deepEqual(Object.keys(conf.covers).sort(), ['16x9','3x4','4x3'])
+  for (const file of Object.values(conf.covers)) assert.equal((await readFile(join(dir,file))).readUInt16BE(),0xffd8)
+  await service.placeVideo({note,sourcePath:original.file.slice(0,-3)+'-assets/成片.mp4'})
+  const zip = await service.exportBundleZip({note})
+  assert.equal(zip.buffer.readUInt32LE(),0x04034b50)
+  const result = await service.backfill({note,record:{platforms:{youtube:{status:'已发布',url:'https://example.org/paper-plane'}}}})
+  assert.equal(result.piece.distributions[0].url,'https://example.org/paper-plane')
+  await pieces.unpublish({note,platform:'YouTube'})
+  assert.equal((await pieces.readPiece(note)).status,'定稿')
+  await pieces.setStatus({note,status:'进行中'})
+  assert.equal((await pieces.readPiece(note)).file,original.file)
+  const vault = new Vault(vaultRoot,{dataDir:root})
+  assert.equal((await vault.listFavorites())[0].title,'纸翼观察')
+  const moved = await vault.confirm(`atom:${PATHS.pending}/2026-03-14-光线观察.md`)
+  await access(join(vaultRoot,moved.to))
+  const source = join(PATHS.pending,'2026-03-14-废弃草图.md')
+  const before = await readFile(join(vaultRoot,source))
+  const trash = await vault.reject(`atom:${source}`)
+  assert.ok(trash.path.startsWith('.trash/自媒体工作台/'))
+  await rename(join(vaultRoot,trash.path), join(vaultRoot,source))
+  assert.deepEqual(await readFile(join(vaultRoot,source)),before)
+})
+
+
+test('first desktop open populates only a fresh public home and never restores a removed item', async t => {
+  const base = await mkdtemp(join(tmpdir(), 'media-desk-first-open-'))
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const env = { DSH_HOME: base }, home = join(base, 'media-desk-public')
+  await initializeDefaultGallery({ ...env, MEDIA_DESK_HOME: join(base, 'custom') })
+  await initializeDefaultGallery({ ...env, MEDIA_DESK_INTEGRATIONS: '1' })
+  assert.deepEqual(await readdir(base), [])
+  await Promise.all([initializeDefaultGallery(env), initializeDefaultGallery(env)])
+  const root = join(home, 'media-desk'), settings = new Settings(root)
+  const pieces = new Pieces(settings, { dataDir: root })
+  const board = await pieces.board()
+  assert.equal(board.pieces.length, 7)
+  const manuscript = await pieces.readPiece(board.pieces[0].note)
+  await rm(manuscript.file)
+  await initializeDefaultGallery(env)
+  assert.equal((await pieces.board()).pieces.length, 6)
+  const existing = join(base, 'existing')
+  await mkdir(join(existing, 'media-desk-public'), { recursive: true })
+  await writeFile(join(existing, 'media-desk-public', 'keep.txt'), 'untouched')
+  await initializeDefaultGallery({ DSH_HOME: existing })
+  assert.deepEqual(await readdir(join(existing, 'media-desk-public')), ['keep.txt'])
+})

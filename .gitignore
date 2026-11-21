@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.release-local/
+.demo*/
+.dsh*/
+*.tgz
+*.zip
+!downloads/dsh-media-desk-desktop-2.7.2.zip
+*.log
+.DS_Store
+.env*
+__pycache__/
